@@ -1,7 +1,7 @@
 {
   "name": "foro-inversor",
   "version": "1.0.0",
-  "description": "Foro Inversor \u2014 escritorio multi-agente de investigaci\u00f3n y estrategia de inversiones",
+  "description": "Foro Inversor — escritorio multi-agente de investigación y estrategia de inversiones",
   "author": "Foro Inversor",
   "private": true,
   "type": "module",
@@ -40,7 +40,7 @@
   "build": {
     "appId": "es.foroinversor.desk",
     "productName": "Foro Inversor",
-    "copyright": "Copyright \u00a9 Foro Inversor",
+    "copyright": "Copyright © Foro Inversor",
     "directories": {
       "output": "release"
     },
@@ -55,13 +55,10 @@
       "target": [
         {
           "target": "nsis",
-          "arch": [
-            "x64"
-          ]
+          "arch": ["x64"]
         }
       ],
-      "artifactName": "ForoInversor-Setup-${version}.${ext}",
-      "icon": "public/icon.png"
+      "artifactName": "ForoInversor-Setup-${version}.${ext}"
     },
     "nsis": {
       "oneClick": false,
@@ -70,9 +67,7 @@
       "shortcutName": "Foro Inversor"
     },
     "linux": {
-      "target": [
-        "AppImage"
-      ],
+      "target": ["AppImage"],
       "category": "Office",
       "icon": "public/icon.png"
     }
