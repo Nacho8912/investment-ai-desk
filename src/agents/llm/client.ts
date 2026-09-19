@@ -3,19 +3,13 @@ import { getMockBrief, getMockICSession, DISCLAIMER } from '../mock/demos'
 import { buildMockStrategy } from '../mock/strategy'
 import { AGENT_ROSTER } from '../roster'
 
-/**
- * Cliente OpenAI-compatible (preset: OpenRouter).
- * Base por defecto: https://openrouter.ai/api/v1
- * Cabeceras opcionales recomendadas por OpenRouter: HTTP-Referer, X-Title.
- * La API key NUNCA se escribe en logs ni en mensajes de error.
- */
+/** Cliente OpenAI-compatible. TODO(P1): mover las peticiones y credenciales al proceso principal Electron. */
 async function chatCompletion(settings: AppSettings, system: string, user: string): Promise<string> {
   const base = (settings.apiBaseUrl || 'https://openrouter.ai/api/v1').replace(/\/$/, '')
   const url = `${base}/chat/completions`
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     Authorization: `Bearer ${settings.apiKey}`,
-    // OpenRouter attribution (sin secretos)
     'HTTP-Referer': 'https://foro-inversor.local',
     'X-Title': 'Foro Inversor',
   }
@@ -32,11 +26,27 @@ async function chatCompletion(settings: AppSettings, system: string, user: strin
     }),
   })
   if (!res.ok) {
-    const t = await res.text()
-    throw new Error(`HTTP ${res.status} en proveedor LLM: ${t.slice(0, 160)}`)
+    // No incluir en errores el cuerpo arbitrario del proveedor: puede contener datos sensibles.
+    throw new Error(`HTTP ${res.status} en proveedor LLM`)
   }
   const data = await res.json()
   return data.choices?.[0]?.message?.content ?? ''
+}
+
+/** Rechazar respuestas no JSON en vez de presentar contenido demo con una insignia «live».
+ * TODO(P4): validar exhaustivamente los tres contratos con esquemas de runtime.
+ */
+function parseLiveObject(raw: string): Record<string, unknown> {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw.replace(/```json|```/g, '').trim())
+  } catch {
+    throw new Error('La respuesta del modelo no contiene JSON válido')
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('La respuesta del modelo no es un objeto JSON')
+  }
+  return parsed as Record<string, unknown>
 }
 
 export async function runLiveResearch(opts: {
@@ -49,22 +59,15 @@ export async function runLiveResearch(opts: {
   const system = `Eres el orquestador de Foro Inversor (es-ES). JSON ResearchBrief. Disclaimer no asesoramiento.`
   const user = `Ticker: ${opts.ticker}\nPregunta: ${opts.question}\nAgentes: ${agents.map((a) => a.name).join(', ')}`
   const raw = await chatCompletion(opts.settings, system, user)
-  try {
-    const parsed = JSON.parse(raw.replace(/```json|```/g, '').trim())
-    return {
-      ...getMockBrief(opts.ticker, opts.question, opts.selectedAgents),
-      ...parsed,
-      mode: 'live',
-      disclaimer: DISCLAIMER,
-      id: `brief-live-${Date.now()}`,
-      createdAt: new Date().toISOString(),
-    }
-  } catch {
-    const mock = getMockBrief(opts.ticker, opts.question, opts.selectedAgents)
-    mock.mode = 'live'
-    mock.synthesis.executiveSummary = raw.slice(0, 2000) || mock.synthesis.executiveSummary
-    return mock
-  }
+  const parsed = parseLiveObject(raw)
+  return {
+    ...getMockBrief(opts.ticker, opts.question, opts.selectedAgents),
+    ...parsed,
+    mode: 'live',
+    disclaimer: DISCLAIMER,
+    id: `brief-live-${Date.now()}`,
+    createdAt: new Date().toISOString(),
+  } as ResearchBrief
 }
 
 export async function runLiveIC(opts: {
@@ -75,22 +78,15 @@ export async function runLiveIC(opts: {
   const system = `CIO Mesa Institucional Foro Inversor. JSON ICSession en español.`
   const user = `Ticker: ${opts.ticker}\nTesis: ${opts.thesis}`
   const raw = await chatCompletion(opts.settings, system, user)
-  try {
-    const parsed = JSON.parse(raw.replace(/```json|```/g, '').trim())
-    return {
-      ...getMockICSession(opts.ticker, opts.thesis),
-      ...parsed,
-      mode: 'live',
-      disclaimer: DISCLAIMER,
-      id: `ic-live-${Date.now()}`,
-      createdAt: new Date().toISOString(),
-    }
-  } catch {
-    const mock = getMockICSession(opts.ticker, opts.thesis)
-    mock.mode = 'live'
-    mock.actaMemo = raw.slice(0, 3000) || mock.actaMemo
-    return mock
-  }
+  const parsed = parseLiveObject(raw)
+  return {
+    ...getMockICSession(opts.ticker, opts.thesis),
+    ...parsed,
+    mode: 'live',
+    disclaimer: DISCLAIMER,
+    id: `ic-live-${Date.now()}`,
+    createdAt: new Date().toISOString(),
+  } as ICSession
 }
 
 export async function runLiveStrategy(opts: {
@@ -109,21 +105,14 @@ PRIORIDAD: aportación MENSUAL (monthlyContributionEur). Debe incluir:
 - disclaimer corto CNMV/no bróker`
   const user = JSON.stringify(opts.input)
   const raw = await chatCompletion(opts.settings, system, user)
-  try {
-    const parsed = JSON.parse(raw.replace(/```json|```/g, '').trim())
-    return {
-      ...buildMockStrategy(opts.input),
-      ...parsed,
-      mode: 'live',
-      disclaimer: DISCLAIMER,
-      id: `strat-live-${Date.now()}`,
-      createdAt: new Date().toISOString(),
-      input: opts.input,
-    }
-  } catch {
-    const mock = buildMockStrategy(opts.input)
-    mock.mode = 'live'
-    mock.executiveBrief = raw.slice(0, 4000) || mock.executiveBrief
-    return mock
-  }
+  const parsed = parseLiveObject(raw)
+  return {
+    ...buildMockStrategy(opts.input),
+    ...parsed,
+    mode: 'live',
+    disclaimer: DISCLAIMER,
+    id: `strat-live-${Date.now()}`,
+    createdAt: new Date().toISOString(),
+    input: opts.input,
+  } as StrategyPlan
 }
