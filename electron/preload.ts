@@ -1,9 +1,13 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
+/** Only purpose-specific operations cross the renderer/main boundary. Never expose ipcRenderer. */
 contextBridge.exposeInMainWorld('foroAPI', {
-  get: (key: string) => ipcRenderer.invoke('store:get', key),
-  set: (key: string, value: unknown) => ipcRenderer.invoke('store:set', key, value),
-  getAll: () => ipcRenderer.invoke('store:getAll'),
+  getAll: () => ipcRenderer.invoke('data:getAll'),
+  setData: (key: string, value: unknown) => ipcRenderer.invoke('data:set', key, value),
+  updateSettings: (settings: unknown, newApiKey?: string) =>
+    ipcRenderer.invoke('settings:update', settings, newApiKey),
+  clearApiKey: () => ipcRenderer.invoke('settings:clearKey'),
+  llmComplete: (system: string, user: string) => ipcRenderer.invoke('llm:complete', system, user),
   getVersion: () => ipcRenderer.invoke('app:getVersion'),
   getQuotes: (symbols: string[]) => ipcRenderer.invoke('market:quotes', symbols),
   auth: {
