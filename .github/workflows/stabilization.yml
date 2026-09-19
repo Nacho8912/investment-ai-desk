@@ -20,6 +20,8 @@ jobs:
         run: npm ci
       - name: TypeScript renderer
         run: npm run typecheck
+      - name: TypeScript Electron
+        run: npx tsc -p tsconfig.electron.json --noEmit
       - name: Source regression checks for IPC and credentials
         run: node --test tests/security-source.test.mjs
       - name: Build renderer and Electron bundles
