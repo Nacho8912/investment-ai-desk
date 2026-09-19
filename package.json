@@ -1,0 +1,80 @@
+{
+  "name": "foro-inversor",
+  "version": "1.0.0",
+  "description": "Foro Inversor \u2014 escritorio multi-agente de investigaci\u00f3n y estrategia de inversiones",
+  "author": "Foro Inversor",
+  "private": true,
+  "type": "module",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "pack:win": "npm run build && electron-builder --win --x64",
+    "pack:dir": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder"
+  },
+  "dependencies": {
+    "electron-store": "^8.2.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.28.0",
+    "uuid": "^11.0.3"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/uuid": "^10.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11",
+    "vite-plugin-electron": "^0.28.8",
+    "vite-plugin-electron-renderer": "^0.14.6"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "build": {
+    "appId": "es.foroinversor.desk",
+    "productName": "Foro Inversor",
+    "copyright": "Copyright \u00a9 Foro Inversor",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "public/**/*",
+      "package.json"
+    ],
+    "extraResources": [],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "ForoInversor-Setup-${version}.${ext}",
+      "icon": "public/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "language": "3082",
+      "shortcutName": "Foro Inversor"
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Office",
+      "icon": "public/icon.png"
+    }
+  }
+}
