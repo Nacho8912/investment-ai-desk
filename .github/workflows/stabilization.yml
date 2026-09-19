@@ -22,8 +22,8 @@ jobs:
         run: npm run typecheck
       - name: TypeScript Electron
         run: npx tsc -p tsconfig.electron.json --noEmit
-      - name: Security regression suite (source guards and validator unit tests)
-        run: node --test tests/security-source.test.mjs tests/ipc-validation.test.mjs tests/p3-security.test.mjs
+      - name: Security and live-schema regression suite
+        run: node --test tests/security-source.test.mjs tests/ipc-validation.test.mjs tests/p3-security.test.mjs tests/p4-llm-validation.test.mjs
       - name: Build renderer and Electron bundles
         run: npm run build
       - name: Diagnose Electron preload startup
