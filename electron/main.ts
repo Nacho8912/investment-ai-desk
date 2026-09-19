@@ -1,7 +1,8 @@
 import { app, BrowserWindow, ipcMain, shell, Menu, safeStorage } from 'electron'
 import type { IpcMainInvokeEvent } from 'electron'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { isIP } from 'node:net'
 import { createRequire } from 'node:module'
 import crypto from 'node:crypto'
 
@@ -10,7 +11,6 @@ const Store = require('electron-store') as typeof import('electron-store')
 const fs = require('node:fs') as typeof import('node:fs')
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 process.env.DIST = path.join(__dirname, '../dist')
-
 interface AuthUserRecord { id: string; username: string; salt: string; hash: string; createdAt: string }
 interface AuthSessionRecord { userId: string; username: string; remember: boolean; loggedInAt: string }
 interface PublicSettings {
@@ -21,18 +21,16 @@ interface PublicSettings {
   model: string
   disclaimerAccepted: boolean
 }
-
 const defaultSettings = {
-  mockMode: true,
-  apiKey: '',
-  apiBaseUrl: 'https://openrouter.ai/api/v1',
-  model: 'openai/gpt-4o-mini',
-  disclaimerAccepted: false,
+  mockMode: true, apiKey: '', apiBaseUrl: 'https://openrouter.ai/api/v1',
+  model: 'openai/gpt-4o-mini', disclaimerAccepted: false,
 }
 const store = new Store({
   name: 'foro-inversor',
   defaults: {
     settings: defaultSettings,
+    llmApiCredential: '',
+    llmLegacyApiKey: '',
     watchlist: [
       { ticker: 'AAPL', name: 'Apple Inc.', note: 'Ejemplo demo' },
       { ticker: 'VWCE', name: 'Vanguard FTSE All-World UCITS ETF', note: 'Ejemplo demo' },
@@ -45,11 +43,9 @@ const store = new Store({
       { ticker: 'AAPL', name: 'Apple Inc.', shares: 15, avgCost: 175.2, currency: 'USD' },
       { ticker: 'ITX', name: 'Inditex', shares: 40, avgCost: 38.1, currency: 'EUR' },
     ],
-    authUsers: [] as AuthUserRecord[],
-    authSession: null as AuthSessionRecord | null,
+    authUsers: [] as AuthUserRecord[], authSession: null as AuthSessionRecord | null,
   },
 })
-
 const SCRYPT_N = 16384, SCRYPT_R = 8, SCRYPT_P = 1, KEYLEN = 64
 function normalizeUsername(u: string) { return u.trim().toLowerCase() }
 function hashPassword(password: string, saltHex: string): string {
@@ -62,7 +58,6 @@ function verifyPassword(password: string, saltHex: string, hashHex: string): boo
   const b = Buffer.from(hashHex, 'hex')
   return a.length === b.length && crypto.timingSafeEqual(a, b)
 }
-
 let mainWindow: BrowserWindow | null = null
 let memorySession: AuthSessionRecord | null = null
 function preloadPath() {
@@ -118,10 +113,9 @@ function createWindow() {
   if (process.env.VITE_DEV_SERVER_URL) mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL)
   else mainWindow.loadFile(path.join(process.env.DIST!, 'index.html'))
 }
-
-/** Migrate the existing plaintext key before changing legacy settings, without returning it to React.
- * On platforms without OS-backed encryption, preserve existing credentials in main-only legacy
- * storage rather than silently deleting a user's key. New keys require safeStorage encryption.
+/** Migrate existing plaintext key before changing legacy settings, without returning it to React.
+ * If encryption is unavailable, retain existing legacy credentials main-only rather than deleting them.
+ * New credentials require OS-backed safeStorage; P6 will later scope credentials by user.
  */
 function migrateLegacyCredential() {
   const current = store.get('settings') as Record<string, unknown>
@@ -142,7 +136,7 @@ function getApiKey(): string {
     if (!safeStorage.isEncryptionAvailable()) throw new Error('Almacén seguro de credenciales no disponible')
     return safeStorage.decryptString(Buffer.from(encrypted, 'base64'))
   }
-  return (store.get('llmLegacyApiKey') as string | undefined) || ''
+  return store.get('llmLegacyApiKey') || ''
 }
 function publicSettings(): PublicSettings {
   const s = store.get('settings') as Record<string, unknown>
@@ -162,6 +156,11 @@ function assertCaller(event: IpcMainInvokeEvent) {
   if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== event.sender.mainFrame) {
     throw new Error('Origen IPC no autorizado')
   }
+  const frameUrl = event.senderFrame.url.split('#')[0]
+  const expected = process.env.VITE_DEV_SERVER_URL
+    ? new URL(process.env.VITE_DEV_SERVER_URL).href.split('#')[0]
+    : pathToFileURL(path.join(process.env.DIST!, 'index.html')).href
+  if (frameUrl !== expected) throw new Error('Navegación IPC no autorizada')
 }
 function assertSession(event: IpcMainInvokeEvent) {
   assertCaller(event)
@@ -194,34 +193,52 @@ function validData(key: unknown, value: unknown): key is (typeof DATA_KEYS)[numb
   if (typeof key !== 'string' || !DATA_KEYS.includes(key as (typeof DATA_KEYS)[number])) return false
   assertData(value, 2_000_000)
   if (!Array.isArray(value) || value.length > 1000 || !value.every(isRecord)) throw new Error('Colección inválida')
+  for (const entry of value) {
+    if (key === 'watchlist') {
+      if (typeof entry.ticker !== 'string' || !entry.ticker.trim() || entry.ticker.length > 32 ||
+          typeof entry.name !== 'string' || entry.name.length > 300 ||
+          (entry.note !== undefined && (typeof entry.note !== 'string' || entry.note.length > 2000))) {
+        throw new Error('Elemento de watchlist inválido')
+      }
+    } else if (key === 'portfolio') {
+      if (typeof entry.ticker !== 'string' || !entry.ticker.trim() || entry.ticker.length > 32 ||
+          typeof entry.name !== 'string' || entry.name.length > 300 ||
+          typeof entry.currency !== 'string' || !/^[A-Z]{3}$/.test(entry.currency) ||
+          typeof entry.shares !== 'number' || !Number.isFinite(entry.shares) || entry.shares < 0 ||
+          typeof entry.avgCost !== 'number' || !Number.isFinite(entry.avgCost) || entry.avgCost < 0) {
+        throw new Error('Posición de cartera inválida')
+      }
+    } else if (typeof entry.id !== 'string' || entry.id.length > 150 ||
+               typeof entry.createdAt !== 'string' || entry.createdAt.length > 60 ||
+               !['mock', 'live'].includes(String(entry.mode))) {
+      throw new Error('Informe inválido')
+    }
+  }
   return true
 }
 function validatedBaseUrl(raw: unknown): string {
   assertText(raw, 'URL', 300)
   let url: URL
   try { url = new URL(raw) } catch { throw new Error('URL del proveedor inválida') }
-  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
-    throw new Error('El proveedor debe utilizar HTTPS sin credenciales en la URL')
-  }
-  if (url.hostname === 'localhost' || url.hostname.endsWith('.localhost') || /^(127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.)/.test(url.hostname)) {
-    throw new Error('Proveedor local no autorizado')
+  const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase()
+  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash ||
+      !host || host === 'localhost' || host.endsWith('.localhost') || isIP(host) !== 0) {
+    throw new Error('El proveedor debe ser un dominio HTTPS, sin credenciales ni parámetros en la URL')
   }
   return url.toString().replace(/\/$/, '')
 }
 function validateSettings(value: unknown): Omit<PublicSettings, 'hasApiKey'> {
-  if (!isRecord(value) || typeof value.mockMode !== 'boolean' || typeof value.disclaimerAccepted !== 'boolean') throw new Error('Configuración inválida')
+  if (!isRecord(value) || typeof value.mockMode !== 'boolean' || typeof value.disclaimerAccepted !== 'boolean') {
+    throw new Error('Configuración inválida')
+  }
   assertText(value.model, 'Modelo', 150)
   if (!value.model.trim()) throw new Error('Modelo vacío')
   if (value.apiKey !== undefined && value.apiKey !== '') throw new Error('Utilice el campo separado de credenciales')
   return {
-    mockMode: value.mockMode,
-    disclaimerAccepted: value.disclaimerAccepted,
-    model: value.model,
-    apiBaseUrl: validatedBaseUrl(value.apiBaseUrl),
-    apiKey: '',
+    mockMode: value.mockMode, disclaimerAccepted: value.disclaimerAccepted,
+    model: value.model, apiBaseUrl: validatedBaseUrl(value.apiBaseUrl), apiKey: '',
   }
 }
-
 app.whenReady().then(() => {
   migrateLegacyCredential()
   const saved = store.get('authSession') as AuthSessionRecord | null
@@ -280,7 +297,7 @@ ipcMain.handle('llm:complete', async (e, system: unknown, user: unknown) => {
   const timer = setTimeout(() => controller.abort(), 60_000)
   try {
     const res = await fetch(`${base}/chat/completions`, {
-      method: 'POST', signal: controller.signal,
+      method: 'POST', signal: controller.signal, redirect: 'error',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}`,
         'HTTP-Referer': 'https://foro-inversor.local', 'X-Title': 'Foro Inversor' },
       body: JSON.stringify({ model: s.model, temperature: 0.4,
@@ -342,7 +359,6 @@ ipcMain.handle('auth:logout', (e) => {
   store.set('authSession', null)
   return { ok: true }
 })
-
 interface MarketQuoteResult {
   symbol: string; price: number | null; changePct: number | null; currency: string | null
   asOf: string | null; marketState: string | null; ok: boolean; error?: string
