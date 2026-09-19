@@ -26,5 +26,7 @@ jobs:
         run: node --test tests/security-source.test.mjs tests/ipc-validation.test.mjs
       - name: Build renderer and Electron bundles
         run: npm run build
+      - name: Diagnose Electron preload startup
+        run: node tests/electron-diagnose.mjs
       - name: Electron Windows smoke on isolated profile
         run: node tests/electron-smoke.mjs
