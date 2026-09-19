@@ -30,6 +30,8 @@ jobs:
         run: node tests/electron-diagnose.mjs
       - name: Electron Windows smoke on isolated profile
         run: node tests/electron-smoke.mjs
+      - name: P3 hostile Electron runtime probes on isolated profile
+        run: node tests/p3-electron-hostile.mjs
       - name: Package Windows NSIS installer (unsigned, verification only)
         run: npx electron-builder --win --x64 --publish never
       - name: Assert installer generated
