@@ -1,73 +1,67 @@
-# Fase 1 — auditoría y estabilización P1–P6
+# Fase 1 — estabilización P1–P6: registro de evidencia
 
-**Estado: en curso. PR #1 en borrador; NO fusionar con `main`.** Base inmutable identificada: `3a1d0636148cdf14576c8e102bcb2fbcb4f129c7` (19-09-2026). Rama exclusiva `stabilization/p1-p6-audit`. Los problemas descritos son observaciones del código, no evidencia de una explotación.
+**19/09/2026. Estado: en curso, PR #1 EN BORRADOR. No fusionar con `main`.** Rama `stabilization/p1-p6-audit`, basada en `main` SHA `3a1d0636148cdf14576c8e102bcb2fbcb4f129c7`. Los hallazgos representan observaciones del código y ensayos delimitados, no una certificación de seguridad completa ni demostración de explotación.
 
-## Línea base reproducible y evidencia
+## 1. Línea base, fallos encontrados y CI reproducible
 
-Se creó `.github/workflows/stabilization.yml`, con Windows y Node.js 22. Ejecuta `npm ci`, `npm run typecheck`, `npx tsc -p tsconfig.electron.json --noEmit`, `node --test tests/security-source.test.mjs tests/ipc-validation.test.mjs` y `npm run build`. La ejecución de línea base previa a P1/P2 (run 35432947382) completó correctamente instalación, comprobación de TypeScript del renderer y compilación. Los controles posteriores se ejecutan sobre cada cambio y su resultado definitivo debe verificarse en https://github.com/Nacho8912/investment-ai-desk/actions antes de aprobar.
+Workflow `.github/workflows/stabilization.yml` en Windows, Node 22: `npm ci`, `npm run typecheck`, `npx tsc -p tsconfig.electron.json --noEmit`, 10 pruebas de fuente/validación mediante `node --test tests/security-source.test.mjs tests/ipc-validation.test.mjs`, `npm run build`, diagnóstico de `preload`, integración real de Electron usando perfil efímero, compilación del instalador NSIS x64 sin firmar y comprobación de que se genera el `.exe`.
 
-No fue posible clonar el repositorio en el entorno de trabajo inicial por un fallo DNS; GitHub Actions ha proporcionado un entorno reproducible independiente, pero **no sustituye** arrancar Electron, probar el instalador ni ejercer las credenciales reales. Las ejecuciones posteriores detectaron y permitieron corregir tres errores TypeScript en claves nuevas de electron-store; una ejecución de tests falló porque Node 22 Windows no admite `node --test tests` como se esperaba. El workflow se corrigió para enumerar los dos archivos de test explícitamente. No confundir resultados de commits antiguos con el commit actual.
+- Línea base anterior a P1/P2: [run 35432947382](https://github.com/Nacho8912/investment-ai-desk/actions/runs/35432947382): instalación, TypeScript renderer y build exitosos (no incluía test de Electron).
+- Primer intento de prueba dinámica: [run 35434094100](https://github.com/Nacho8912/investment-ai-desk/actions/runs/35434094100): el puente `window.foroAPI` no existía al arrancar la versión compilada; los checks estáticos previos habían pasado.
+- Diagnóstico: Vite había generado código CommonJS con extensión `.mjs`, incompatible con el modo de carga esperado. `vite.config.ts` ahora produce `preload.cjs` y se eliminó el `dist-electron/preload.mjs` rastreado para impedir que `preloadPath()` eligiera el archivo obsoleto. [Run 35434263500](https://github.com/Nacho8912/investment-ai-desk/actions/runs/35434263500) confirmó que el puente volvió a existir.
+- Una prueba de persistencia detectó un defecto en el arnés (redirigir `APPDATA` no trasladaba el `app.getPath('userData')`). Se creó `tests/electron-test-main.cjs`, exclusivo para CI, que establece un directorio temporal ANTES de importar el main de producción. No desactiva autenticación ni validación IPC.
+- [Run 35434394347](https://github.com/Nacho8912/investment-ai-desk/actions/runs/35434394347): éxito en instalación, TypeScript renderer/Electron, 10 pruebas, compilación, arranque de `preload` y prueba integrada completa en Windows con datos sintéticos.
+- [Run 35434468548](https://github.com/Nacho8912/investment-ai-desk/actions/runs/35434468548): instalador falló porque `public/icon.png` no tiene 256×256 píxeles; el error es de empaquetado, no de las pruebas P1/P2, que pasaron.
+- **[Run 35434558046](https://github.com/Nacho8912/investment-ai-desk/actions/runs/35434558046): SUCCESS** en todos los pasos anteriores y empaquetado NSIS Windows x64. Se quitó provisionalmente la referencia al icono insuficiente en la configuración Windows: el instalador usa icono predeterminado hasta sustituir el recurso gráfico por uno válido. Solo se comprobó CREACIÓN del ejecutable sin firma, NO instalación ni lanzamiento del binario instalado.
 
-`npm ci` informa de 18 avisos de vulnerabilidad de dependencias (3 moderados, 14 altos, 1 crítico); NO se han analizado aún sus rutas de explotación ni su alcance en producción. Pendiente `npm audit` con triaje y actualizaciones controladas; evitar `npm audit fix --force` indiscriminado.
+En cada nuevo commit debe consultarse su propia ejecución, sin trasladar resultados de un SHA antiguo.
 
-## P1 — API key expuesta al renderer
+`npm ci` informa de **18 avisos de vulnerabilidad** (3 moderadas, 14 altas, 1 crítica). Falta `npm audit` y clasificación de rutas afectadas y relevancia producción/desarrollo; NO equivalen automáticamente a fallos explotables en el ejecutable. No aplicar `npm audit fix --force` sin pruebas.
 
-**Original confirmado:** los manejadores `store:get` y `store:getAll` devolvían configuración completa; `preload.ts` exponía `get` genérico y el cliente `src/agents/llm/client.ts` enviaba `Authorization` desde React. El estado y el almacenamiento web podían contener la clave.
+## 2. P1 — Credenciales LLM: implementado, integración sintética superada, aceptación final pendiente
 
-**Implementación actual en rama:**
-- `electron/main.ts` migra la clave heredada desde `settings.apiKey`, escribe una credencial cifrada con `safeStorage` si el SO proporciona cifrado y borra el valor del objeto de configuración. Las nuevas claves requieren cifrado disponible. Si el SO no proporciona cifrado, **una clave heredada se preserva sin cifrar bajo `llmLegacyApiKey` en el almacén del proceso principal para evitar pérdida silenciosa**. Este riesgo residual exige una política de migración/advertencia antes de declarar P1 cerrado.
-- `publicSettings` solo devuelve `apiKey: ''` y `hasApiKey` booleano. `data:getAll` emplea esa proyección; se ha eliminado el lector genérico.
-- `settings:update` recibe por separado la clave nueva, la cifra en main y nunca la devuelve. `settings:clearKey` borra credenciales. En la pantalla de ajustes la clave recién introducida existe transitoriamente en el campo mientras se escribe, pero no se incorpora al estado global ni se rehidrata tras guardar.
-- `llm:complete` usa la clave y realiza `fetch` en main con timeout, HTTPS, rechazo de redirecciones y mensajes HTTP sin volcar el cuerpo del proveedor. La capa cliente de React únicamente invoca el puente de Electron. El modo web elimina cualquier clave heredada en su `localStorage` y se limita a demo; no puede seguir utilizando IA live desde navegador.
-- `src/agents/orchestrator.ts` y `HomePage.tsx` usan `hasApiKey`, no el secreto, para activar la IA.
+**Problema original:** `store:get/getAll` y el cliente React exponían o utilizaban `settings.apiKey` desde el renderer, con solicitudes autenticadas generadas allí. La variante navegador almacenaba la configuración en `localStorage`.
 
-**Compatibilidad que cambia intencionalmente:** URLs de proveedores exigen HTTPS y nombre DNS, sin IP/localhost, credenciales embebidas, query ni hash. Las claves antiguas se migran en el primer arranque; se requiere ensayo real de migración y recuperación. Las claves siguen siendo globales entre usuarios locales hasta P6; no afirmar aislamiento multicuenta.
+**Cambios realizados:** credencial y solicitudes OpenRouter trasladadas a `electron/main.ts`; `publicSettings()` siempre devuelve `apiKey:''` y el booleano `hasApiKey`; el renderer guarda la clave nueva transitoriamente en un campo de contraseña y la envía únicamente a `settings:update`, sin rehidratarla en el estado global; `settings:clearKey` permite borrarla. Electron `safeStorage` cifra claves nuevas cuando se encuentra disponible; migración de `settings.apiKey` al primer arranque. El cliente web elimina una clave heredada y funciona solo en modo demo. El proveedor debe utilizar HTTPS con validaciones de URL; la petición main rechaza redirecciones y tiene timeout. Contratos y pantallas adaptados a `hasApiKey`.
 
-**Aceptar P1 solo después de:** instalación real con clave previa y sin ella; copia de seguridad/recuperación; comprobar que `getAll`, estado React, logs y DevTools no devuelven la clave; probar alta, rotación, eliminación y petición a OpenRouter válida y fallida en Windows; comprobar comportamiento al no haber cifrado, integridad y restauración ante fallo de migración.
+**Verificado con Electron Windows real y perfil temporal, sin clave real ni llamadas externas:** guardar, rotar y eliminar claves ficticias; lectura de configuración redactada; rechazo de intento de escribir clave en settings públicos; comprobación de que el JSON no contiene clave nueva en texto claro, contiene credencial cifrada; cerrar/iniciar sesión, reiniciar y conservar clave; insertar fixture legacy en el JSON temporal, arrancar y comprobar migración a cifrado con clave borrada de settings y watchlist intacta. El modo offline rechaza la solicitud LLM.
 
-## P2 — IPC arbitrario
+**Pendiente para aceptar P1:** pruebas con instalación Windows de usuario existente y copia/rollback; prueba auténtica OpenRouter (respuesta normal y fallida), revisión de DevTools/logs y escenarios de cifrado no disponible. **Riesgo residual:** si el SO no proporciona cifrado, una clave *heredada* puede conservarse provisionalmente sin cifrar bajo `llmLegacyApiKey` en almacenamiento main-only para evitar pérdida; claves NUEVAS sí exigen cifrado. Debe establecerse política segura de migración/fallo antes del cierre definitivo. La clave sigue siendo global entre cuentas hasta P6.
 
-**Original confirmado:** `store:set` aceptaba cualquier clave/valor y el renderer disponía de `foroAPI.set`, incluido acceso potencial a `authUsers`, `authSession` y credenciales.
+## 3. P2 — IPC: implementado, integración sintética superada, aceptación final pendiente
 
-**Implementación actual en rama:**
-- Eliminados los manejadores `store:get`, `store:set` y la API genérica preload; reemplazados por `data:getAll` (solo datos permitidos/redactados), `data:set` con allowlist estricta de `watchlist`, `briefs`, `portfolio`, `icSessions` y `strategies`, `settings:update`, `settings:clearKey` y `llm:complete`.
-- Los manejadores contrastan WebContents, frame principal, URL de inicio permitida y sesión iniciada para operaciones sobre datos/credenciales. Las rutas de autenticación comprueban procedencia y validan el tipo/tamaño de sus entradas.
-- `data:set` valida que las colecciones sean arrays de objetos, tamaño máximo, profundidad, tipos JSON y claves peligrosas; valida campos básicos de watchlist y cartera, además de id/fecha/modo en informes. No se permite alterar `settings` ni claves de autenticación mediante `data:set`. Se acota el número/tamaño de símbolos de cotización. `settings:update` valida configuración y URL del proveedor.
-- Tests de invariantes de fuente en `tests/security-source.test.mjs` y de ejecución de validador real aislado en `tests/ipc-validation.test.mjs` verifican claves protegidas, formas de entrada, no-finitos, polución de prototipos, tamaño y profundidad.
+**Problema original:** `store:set` aceptaba cualquier clave y valor, incluyendo posibles modificaciones de `authUsers`, `authSession` o credenciales, y `preload` exponía `get/set` genéricos.
 
-**Limitaciones:** aún no hay ensayos integrados con Electron ni tests de origen/frame reales; los informes solamente tienen validación superficial, pendiente P4. `data:set` no añade todavía bloqueo/serialización explícita de escrituras concurrentes: comprobar orden y persistencia en regresión. El renderer sigue ejecutando JS capaz de pedir acciones autorizadas de su sesión; P3 será necesario para reducir superficie XSS. No declarar P2 cerrado sin pruebas de host.
+**Cambios realizados:** métodos específicos `data:getAll`, `data:set`, `settings:update`, `settings:clearKey`, `llm:complete`; comprobaciones de webContents/frame principal/URL/sesión en canales sensibles; allowlist de datos (`watchlist`, `briefs`, `portfolio`, `icSessions`, `strategies`) y límites de tamaño, profundidad, tipos JSON y estructura básica; autenticación valida entradas. No existe escritor general de configuración o credenciales a través de `data:set`.
 
-**Aceptar P2 solo después de:** invocar IPC en Windows desde frame no autorizado y frame principal legítimo, antes/después de login y logout; comprobar rechazo de `authUsers`, `authSession`, `llmApiCredential`, `settings`, objetos malformados, payloads enormes; comprobar guardado/recuperación de cada colección real con datos de la versión previa, y ausencia de condiciones de carrera.
+**Verificado:** 10 tests de validación e invariantes; en Electron real, las lecturas y escrituras antes de login y tras logout se rechazan, se puede registrar y acceder, guardar watchlist, rechazar claves protegidas y cartera malformada y denegar acceso desde iframe secundario. Se comprobó persistencia y recuperación de la watchlist tras reinicio.
 
-## P3 — sandbox y navegación: pendiente
+**Pendiente para aceptar P2:** adversarial tests exhaustivos de origen externo/navegación, todas las colecciones y formatos antiguos, escrituras concurrentes, integridad del instalador ya instalado; informes siguen validados superficialmente (P4). La acción autorizada por el usuario desde JS renderer sigue requiriendo mitigaciones de P3.
 
-En `electron/main.ts` sigue `sandbox:false`. Se limita `window.open` a esquema HTTPS como mitigación menor, pero sin allowlist de hosts ni protección general `will-navigate`/CSP. Próxima fase: activar sandbox tras adaptar preload, política de navegación/URLs externas, CSP y permisos; comprobar desarrollo y versión distribuida.
+## 4. P3 — Sandbox y navegación: PENDIENTE
 
-## P4 — validación LLM: pendiente
+`sandbox:false` continúa configurado. El `window.open` permite temporalmente HTTPS, pero no hay allowlist estricta por host, bloqueo general `will-navigate` ni CSP robusta. Habilitar sandbox y revisar adaptación `preload.cjs`, permisos y enlaces externos en dev/producción; después prueba dinámica.
 
-`parseLiveObject` solo valida JSON y objeto raíz; el cliente todavía mezcla un objeto incompleto con un informe mock y hace casts TypeScript, no esquemas completos ni invariantes financieras. Requiere validación estructural runtime para `ResearchBrief`, `ICSession`, `StrategyPlan` y control de importes, porcentajes y procedencia de datos.
+## 5. P4 — Contratos del proveedor: PENDIENTE
 
-## P5 — falsos resultados live: mitigación parcial
+`parseLiveObject` comprueba JSON/raíz objeto pero no valida exhaustivamente estructuras anidadas, porcentajes, euros ni invariantes; `as ResearchBrief/ICSession/StrategyPlan` no es validación runtime. Crear esquemas completos y prueba de respuestas inválidas, sin mezclar objetos mock/live.
 
-JSON inválido/null/array provoca error y el orquestador devuelve resultado mock con advertencia. JSON con estructura incorrecta pero raíz objeto todavía puede etiquetarse live: bloquear hasta cerrar P4. La eliminación del cuerpo arbitrario del error HTTP reduce filtración en errores.
+## 6. P5 — Veracidad de live: MITIGACIÓN PARCIAL
 
-## P6 — datos entre cuentas: pendiente
+JSON no parseable, `null` o array lanza error y el orquestador presenta demo con aviso y `mode:'mock'`. Un JSON raíz objeto pero incompleto podría aún etiquetarse `live` tras mezclar campos simulados. Bloqueado hasta resolver P4 y probar con proveedor simulado.
 
-`watchlist`, `briefs`, `portfolio`, `icSessions`, `strategies`, `settings` y las credenciales de proveedor aún son globales para la instalación, aunque IPC exige una sesión. Crear namespace por `userId` tomado exclusivamente de sesión del proceso principal; migrar datos globales con estrategia explícita y rollback, aislar usuarios A/B y credenciales, y repetir pruebas tras reiniciar. No anunciar privacidad entre usuarios de un mismo PC hasta cerrar P6.
+## 7. P6 — Separación por usuario: PENDIENTE
 
-## Lista manual de regresión y aceptación
+Los datos, ajustes y credenciales siguen siendo globales por instalación aunque `data` requiera sesión. Migrar a almacenamiento por `userId` obtenido solo desde sesión de Electron main, resolver asignación de datos legacy con backup/rollback y comprobar usuarios A/B y reinicios. No anunciar privacidad entre usuarios del mismo PC.
 
-- Confirmar instalación y arranque Electron en Windows, sin contraseña/clave previa y con instalación existente; realizar copia recuperable antes de migrar.
-- Registrar usuario, login, «recordarme», logout, relogin y uso normal de cartera, watchlist, informes y estrategias.
-- Guardar configuración pública sin clave, introducir clave nueva, realizar petición real de OpenRouter, reiniciar, comprobar clave persistente sin exposición, rotar/eliminar clave y probar fallos del proveedor. Nunca pegar credenciales reales en issues, logs o capturas.
-- Rechazar IPC de frame secundario, web no confiable y sin sesión; verificar intento de escribir claves reservadas y estructuras maliciosas.
-- Verificar diferencia mock/live cuando la API responde mal; P4/P5 seguirán abiertos para JSON objeto estructuralmente inválido.
-- Empaquetar `npm run pack:win`, instalar y abrir ejecutable, comprobar preload, rutas, menú, Yahoo, cierre y recuperación tras reinicio.
-- Ejecutar `npm audit` y clasificar vulnerabilidades directas/transitivas y de desarrollo/producción. Evitar actualizaciones incompatibles no verificadas.
+## 8. Lista de aceptación pendiente
 
-## Reglas de mantenimiento
+1. Hacer copia de seguridad del perfil real, probar migración sobre una COPIA y validar reversión. Nunca exponer claves en capturas/issues/logs.
+2. Instalar el NSIS sin firma en equipo de pruebas Windows, lanzar, comprobar preload y los flujos de login, mercado, watchlist, cartera, IC, estrategia y cierre/reapertura; validar reputación/firma antes de distribuir.
+3. Probar OpenRouter de verdad con credencial dedicada de pruebas: éxito y errores sin fugas de clave; verificar URL no fiable/redirecciones y fallo de cifrado.
+4. Probar todos los contratos IPC desde frames externos, requests concurrentes y payloads límite; persistencia de todas las colecciones antiguas.
+5. Sustituir el icono Windows provisional por recurso válido ≥256×256 y revalidar empaquetado y versión instalada.
+6. Ejecutar `npm audit` y clasificar dependencias, sin aplicar actualizaciones rompedoras automáticamente.
+7. P3–P6 deben completarse y verificarse antes de aprobar/fusionar el PR de la fase 1.
 
-1. Consultar siempre la ejecución de GitHub Actions **del último SHA**, no una anterior; guardar URL, resultado y logs de fallos.
-2. Mantener PR #1 en borrador, rama independiente, sin fusión en `main`.
-3. No declarar P1/P2 completamente verificados antes de pruebas dinámicas y migración; no declarar P3–P6 cerrados.
-4. No publicar claves ni datos privados en el repositorio público.
+**Regla:** documentar commit, ejecución exacta y criterios pendientes; conservar siempre `main` sin cambios hasta autorización de fusión y revisión final.
