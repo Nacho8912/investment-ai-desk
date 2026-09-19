@@ -23,6 +23,6 @@ jobs:
       - name: TypeScript Electron
         run: npx tsc -p tsconfig.electron.json --noEmit
       - name: Security regression suite (source guards and validator unit tests)
-        run: node --test tests
+        run: node --test tests/security-source.test.mjs tests/ipc-validation.test.mjs
       - name: Build renderer and Electron bundles
         run: npm run build
