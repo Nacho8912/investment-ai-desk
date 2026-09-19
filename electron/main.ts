@@ -5,6 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { isIP } from 'node:net'
 import { createRequire } from 'node:module'
 import crypto from 'node:crypto'
+import { hardenWindow } from './window-security'
 
 const require = createRequire(import.meta.url)
 const Store = require('electron-store') as typeof import('electron-store')
@@ -61,11 +62,9 @@ function verifyPassword(password: string, saltHex: string, hashHex: string): boo
 let mainWindow: BrowserWindow | null = null
 let memorySession: AuthSessionRecord | null = null
 function preloadPath() {
-  for (const name of ['preload.mjs', 'preload.js', 'preload.cjs']) {
-    const p = path.join(__dirname, name)
-    if (fs.existsSync(p)) return p
-  }
-  return path.join(__dirname, 'preload.mjs')
+  const p = path.join(__dirname, 'preload.cjs')
+  if (!fs.existsSync(p)) throw new Error('No se encuentra el preload seguro de Electron')
+  return p
 }
 function iconPath() {
   const p = path.join(__dirname, '../public/icon.png')
@@ -101,15 +100,11 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1480, height: 940, minWidth: 1100, minHeight: 720,
     title: 'Foro Inversor', backgroundColor: '#070b14', icon: iconPath(),
-    webPreferences: { preload: preloadPath(), contextIsolation: true, nodeIntegration: false, sandbox: false },
+    webPreferences: { preload: preloadPath(), contextIsolation: true, nodeIntegration: false, sandbox: true, webviewTag: false },
     show: false,
   })
   mainWindow.once('ready-to-show', () => mainWindow?.show())
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    // P3 pending: narrow this further to an explicit external-link allowlist.
-    if (url.startsWith('https://')) void shell.openExternal(url)
-    return { action: 'deny' }
-  })
+  hardenWindow(mainWindow)
   if (process.env.VITE_DEV_SERVER_URL) mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL)
   else mainWindow.loadFile(path.join(process.env.DIST!, 'index.html'))
 }
