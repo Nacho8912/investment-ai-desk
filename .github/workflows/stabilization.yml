@@ -30,3 +30,11 @@ jobs:
         run: node tests/electron-diagnose.mjs
       - name: Electron Windows smoke on isolated profile
         run: node tests/electron-smoke.mjs
+      - name: Package Windows NSIS installer (unsigned, verification only)
+        run: npx electron-builder --win --x64 --publish never
+      - name: Assert installer generated
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem -Path release -Filter 'ForoInversor-Setup-*.exe' -File -ErrorAction SilentlyContinue)
+          if ($files.Count -lt 1) { throw 'Windows NSIS installer missing' }
+          Write-Host 'PASS: Windows NSIS installer generated (unsigned; installation not tested)'
