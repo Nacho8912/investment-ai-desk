@@ -1,13 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import type {
-  AppSettings,
-  AuthSessionInfo,
-  Holding,
-  ICSession,
-  ResearchBrief,
-  StrategyPlan,
-  ToastMessage,
-  WatchItem,
+  AppSettings, AuthSessionInfo, Holding, ICSession, ResearchBrief,
+  StrategyPlan, ToastMessage, WatchItem,
 } from '../types'
 import { loadState, saveKey } from '../lib/storage'
 import { authLogout } from '../lib/auth'
@@ -33,17 +27,9 @@ interface Ctx {
   toast: (type: ToastMessage['type'], text: string) => void
   dismissToast: (id: string) => void
 }
-
 const AppCtx = createContext<Ctx | null>(null)
-
-export function AppStateProvider({
-  children,
-  authSession,
-  onLogout,
-}: {
-  children: React.ReactNode
-  authSession: AuthSessionInfo
-  onLogout: () => void
+export function AppStateProvider({ children, authSession, onLogout }: {
+  children: React.ReactNode; authSession: AuthSessionInfo; onLogout: () => void
 }) {
   const [ready, setReady] = useState(false)
   const [settings, setSettingsState] = useState<AppSettings | null>(null)
@@ -65,95 +51,61 @@ export function AppStateProvider({
       setReady(true)
     })
   }, [])
-
   const toast = useCallback((type: ToastMessage['type'], text: string) => {
     const id = `t-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
     setToasts((prev) => [...prev, { id, type, text }])
     setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4200)
   }, [])
-
   const dismissToast = useCallback((id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id))
   }, [])
-
   const setSettings = useCallback(async (s: AppSettings) => {
-    setSettingsState(s)
-    await saveKey('settings', s)
+    // The credential is accepted only as a transient parameter to main and never placed in context.
+    const persisted = await saveKey('settings', s)
+    if (!persisted) throw new Error('No se pudo guardar la configuración')
+    setSettingsState({ ...persisted, apiKey: '' })
   }, [])
-
   const setWatchlist = useCallback(async (w: WatchItem[]) => {
-    setWatchlistState(w)
     await saveKey('watchlist', w)
+    setWatchlistState(w)
   }, [])
-
   const addBrief = useCallback(async (b: ResearchBrief) => {
-    setBriefsState((prev) => {
-      const next = [b, ...prev].slice(0, 40)
-      void saveKey('briefs', next)
-      return next
-    })
-  }, [])
-
+    const next = [b, ...briefs].slice(0, 40)
+    await saveKey('briefs', next)
+    setBriefsState(next)
+  }, [briefs])
   const setPortfolio = useCallback(async (p: Holding[]) => {
-    setPortfolioState(p)
     await saveKey('portfolio', p)
+    setPortfolioState(p)
   }, [])
-
   const addICSession = useCallback(async (s: ICSession) => {
-    setICState((prev) => {
-      const next = [s, ...prev].slice(0, 30)
-      void saveKey('icSessions', next)
-      return next
-    })
-  }, [])
-
+    const next = [s, ...icSessions].slice(0, 30)
+    await saveKey('icSessions', next)
+    setICState(next)
+  }, [icSessions])
   const addStrategy = useCallback(async (s: StrategyPlan) => {
-    setStratState((prev) => {
-      const next = [s, ...prev].slice(0, 30)
-      void saveKey('strategies', next)
-      return next
-    })
-  }, [])
-
+    const next = [s, ...strategies].slice(0, 30)
+    await saveKey('strategies', next)
+    setStratState(next)
+  }, [strategies])
   const acceptDisclaimer = useCallback(async () => {
     if (!settings) return
     await setSettings({ ...settings, disclaimerAccepted: true })
   }, [settings, setSettings])
-
   const logout = useCallback(async () => {
     await authLogout()
     onLogout()
   }, [onLogout])
-
   const value = useMemo<Ctx | null>(() => {
     if (!settings) return null
     return {
-      ready,
-      settings,
-      watchlist,
-      briefs,
-      portfolio,
-      icSessions,
-      strategies,
-      toasts,
-      authSession,
-      setSettings,
-      setWatchlist,
-      addBrief,
-      setPortfolio,
-      addICSession,
-      addStrategy,
-      acceptDisclaimer,
-      logout,
-      toast,
-      dismissToast,
+      ready, settings, watchlist, briefs, portfolio, icSessions, strategies, toasts,
+      authSession, setSettings, setWatchlist, addBrief, setPortfolio, addICSession,
+      addStrategy, acceptDisclaimer, logout, toast, dismissToast,
     }
-  }, [
-    ready, settings, watchlist, briefs, portfolio, icSessions, strategies, toasts, authSession,
-    setSettings, setWatchlist, addBrief, setPortfolio, addICSession, addStrategy,
-    acceptDisclaimer, logout, toast, dismissToast,
-  ])
-
+  }, [ready, settings, watchlist, briefs, portfolio, icSessions, strategies, toasts,
+    authSession, setSettings, setWatchlist, addBrief, setPortfolio, addICSession,
+    addStrategy, acceptDisclaimer, logout, toast, dismissToast])
   if (!value) {
     return (
       <div className="splash">
@@ -163,10 +115,8 @@ export function AppStateProvider({
       </div>
     )
   }
-
   return <AppCtx.Provider value={value}>{children}</AppCtx.Provider>
 }
-
 export function useAppState() {
   const ctx = useContext(AppCtx)
   if (!ctx) throw new Error('useAppState fuera de provider')
