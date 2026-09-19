@@ -7,64 +7,61 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 
-/** Real Electron smoke test through Chrome DevTools Protocol on an isolated CI profile.
- * No production test bypass, network credentials or live LLM calls are used.
- * Never print stored credentials, CDP payloads or the contents of the profile.
- */
+// End-to-end tests execute the production main and preload bundles through a
+// test-only bootstrap that sets app.userData BEFORE electron-store is loaded.
+// All credentials are fictional. Never print credentials, profile or CDP payloads.
 if (process.platform !== 'win32' || process.env.CI !== 'true') {
-  throw new Error('Electron smoke requires an ephemeral Windows GitHub Actions runner (CI=true)')
+  throw new Error('Only run this test on a disposable Windows CI runner')
 }
 const require = createRequire(import.meta.url)
-const binary = require('electron')
+const electron = require('electron')
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const scratch = mkdtempSync(path.join(os.tmpdir(), 'foro-electron-smoke-'))
-const appData = path.join(scratch, 'roaming')
-const localData = path.join(scratch, 'local')
-mkdirSync(appData, { recursive: true })
-mkdirSync(localData, { recursive: true })
+const profile = path.join(scratch, 'profile')
+mkdirSync(profile, { recursive: true })
 const settings = {
   mockMode: true, apiKey: '', hasApiKey: false,
-  apiBaseUrl: 'https://openrouter.ai/api/v1',
-  model: 'openai/gpt-4o-mini', disclaimerAccepted: true,
+  apiBaseUrl: 'https://openrouter.ai/api/v1', model: 'openai/gpt-4o-mini',
+  disclaimerAccepted: true,
 }
-let running = null
-
+let child = null
+let connection = null
+const pause = ms => new Promise(resolve => setTimeout(resolve, ms))
 async function freePort() {
   const server = createServer()
   return new Promise((resolve, reject) => {
     server.once('error', reject)
     server.listen(0, '127.0.0.1', () => {
-      const address = server.address()
-      server.close(() => resolve(address.port))
+      const port = server.address().port
+      server.close(() => resolve(port))
     })
   })
 }
-
 class CDP {
   constructor(socket) {
     this.socket = socket
-    this.id = 0
+    this.nextId = 0
     this.pending = new Map()
-    socket.addEventListener('message', (event) => {
-      let message
-      try { message = JSON.parse(event.data) } catch { return }
-      const request = this.pending.get(message.id)
-      if (!request) return
-      this.pending.delete(message.id)
-      clearTimeout(request.timer)
-      if (message.error) request.reject(new Error('CDP method rejected'))
-      else request.resolve(message.result)
+    socket.addEventListener('message', event => {
+      let msg
+      try { msg = JSON.parse(event.data) } catch { return }
+      const pending = this.pending.get(msg.id)
+      if (!pending) return
+      this.pending.delete(msg.id)
+      clearTimeout(pending.timer)
+      if (msg.error) pending.reject(new Error('CDP command rejected'))
+      else pending.resolve(msg.result)
     })
     socket.addEventListener('close', () => {
-      for (const request of this.pending.values()) {
-        clearTimeout(request.timer)
-        request.reject(new Error('CDP socket closed'))
+      for (const pending of this.pending.values()) {
+        clearTimeout(pending.timer)
+        pending.reject(new Error('CDP disconnected'))
       }
       this.pending.clear()
     })
   }
-  send(method, params = {}) {
-    const id = ++this.id
+  command(method, params = {}) {
+    const id = ++this.nextId
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
@@ -74,190 +71,171 @@ class CDP {
       this.socket.send(JSON.stringify({ id, method, params }))
     })
   }
-  async evaluate(script) {
-    const output = await this.send('Runtime.evaluate', {
-      expression: `(async () => { ${script} })()`,
+  async eval(body) {
+    const result = await this.command('Runtime.evaluate', {
+      expression: `(async () => { ${body} })()`,
       awaitPromise: true, returnByValue: true,
     })
-    if (output.exceptionDetails || output.result?.subtype === 'error') {
-      throw new Error('Electron renderer assertion raised an exception')
+    if (result.exceptionDetails || result.result?.subtype === 'error') {
+      throw new Error('Renderer test evaluation failed')
     }
-    return output.result?.value
+    return result.result?.value
   }
   close() { this.socket.close() }
 }
-
 async function start() {
   const port = await freePort()
-  const child = spawn(binary, ['.', `--remote-debugging-port=${port}`,
-    '--remote-debugging-address=127.0.0.1', '--disable-gpu'], {
-    cwd: root,
-    env: { ...process.env, APPDATA: appData, LOCALAPPDATA: localData, VITE_DEV_SERVER_URL: '' },
-    stdio: 'ignore', windowsHide: true,
+  child = spawn(electron, ['tests/electron-test-main.cjs',
+    `--remote-debugging-port=${port}`, '--remote-debugging-address=127.0.0.1', '--disable-gpu'], {
+    cwd: root, stdio: 'ignore', windowsHide: true,
+    env: { ...process.env, VITE_DEV_SERVER_URL: '', FORO_E2E_USER_DATA: profile },
   })
-  running = child
-  const until = Date.now() + 60000
-  let target = null
-  while (Date.now() < until) {
-    if (child.exitCode !== null) throw new Error('Electron exited before its page became available')
+  let page
+  for (let n = 0; n < 200; n++) {
+    if (child.exitCode !== null) throw new Error('Electron exited before loading the window')
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(1500) })
-      if (response.ok) {
-        const targets = await response.json()
-        target = targets.find(t => t.type === 'page' && t.url.startsWith('file:') && t.webSocketDebuggerUrl)
-        if (target) break
-      }
-    } catch { /* DevTools endpoint starts asynchronously. */ }
-    await new Promise(resolve => setTimeout(resolve, 300))
+      const res = await fetch(`http://127.0.0.1:${port}/json/list`, {
+        signal: AbortSignal.timeout(1000),
+      })
+      const pages = await res.json()
+      page = pages.find(p => p.type === 'page' && p.url.startsWith('file:') && p.webSocketDebuggerUrl)
+      if (page) break
+    } catch { /* Endpoint not ready yet. */ }
+    await pause(250)
   }
-  if (!target) throw new Error('Electron application window did not load in time')
-  const socket = new WebSocket(target.webSocketDebuggerUrl)
+  if (!page) throw new Error('Electron did not create its production page')
+  const socket = new WebSocket(page.webSocketDebuggerUrl)
   await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('CDP socket connection timeout')), 10000)
+    const timer = setTimeout(() => reject(new Error('CDP connection timeout')), 10000)
     socket.addEventListener('open', () => { clearTimeout(timer); resolve() }, { once: true })
-    socket.addEventListener('error', () => { clearTimeout(timer); reject(new Error('CDP websocket connection failed')) }, { once: true })
+    socket.addEventListener('error', () => { clearTimeout(timer); reject(new Error('CDP connection failed')) }, { once: true })
   })
-  const cdp = new CDP(socket)
-  await cdp.send('Runtime.enable')
-  const ready = await cdp.evaluate(`return { bridge: !!window.foroAPI, noRead: !window.foroAPI?.get,
-    noWrite: !window.foroAPI?.set, noRawIpc: !window.ipcRenderer }`)
-  assert.deepEqual(ready, { bridge: true, noRead: true, noWrite: true, noRawIpc: true })
-  return cdp
+  connection = new CDP(socket)
+  await connection.command('Runtime.enable')
+  let bridge
+  for (let n = 0; n < 40; n++) {
+    bridge = await connection.eval(`return {
+      ready: !!window.foroAPI, noGet: !window.foroAPI?.get,
+      noSet: !window.foroAPI?.set, noIpc: !window.ipcRenderer
+    }`)
+    if (bridge.ready) break
+    await pause(250)
+  }
+  assert.deepEqual(bridge, { ready: true, noGet: true, noSet: true, noIpc: true },
+    'production preload must expose only the restricted bridge')
+  return connection
 }
-
-async function stop(cdp) {
-  try { cdp?.close() } catch { /* Electron may already have exited. */ }
-  if (!running) return
-  const child = running
-  running = null
-  if (child.exitCode === null) child.kill()
-  await new Promise(resolve => {
-    if (child.exitCode !== null) return resolve()
-    child.once('exit', resolve)
-    setTimeout(resolve, 5000)
-  })
+async function stop() {
+  const current = child
+  child = null
+  connection?.close()
+  connection = null
+  if (!current) return
+  if (current.exitCode === null) current.kill()
+  await Promise.race([
+    new Promise(resolve => current.once('exit', resolve)), pause(5000),
+  ])
 }
-
-function locateStore(dir) {
-  for (const item of readdirSync(dir, { withFileTypes: true })) {
-    const name = path.join(dir, item.name)
-    if (item.isFile() && item.name === 'foro-inversor.json') return name
+function findStore(directory) {
+  for (const item of readdirSync(directory, { withFileTypes: true })) {
+    const filename = path.join(directory, item.name)
+    if (item.isFile() && item.name === 'foro-inversor.json') return filename
     if (item.isDirectory()) {
-      const found = locateStore(name)
-      if (found) return found
+      const nested = findStore(filename)
+      if (nested) return nested
     }
   }
   return null
 }
-
 try {
   let cdp = await start()
-  const before = await cdp.evaluate(`let noSession = false, noWrite = false;
-    try { await window.foroAPI.getAll() } catch { noSession = true }
-    try { await window.foroAPI.setData('watchlist', []) } catch { noWrite = true }
-    return { noSession, noWrite, version: await window.foroAPI.getVersion() }`)
-  assert.equal(before.noSession, true, 'reading data requires login')
-  assert.equal(before.noWrite, true, 'writing data requires login')
-  assert.equal(typeof before.version, 'string')
-
-  const register = await cdp.evaluate(`return window.foroAPI.auth.register('ci-smoke-user', 'ci-smoke-password-123')`)
-  assert.equal(register.ok, true, 'registration through real Electron IPC')
-  const actual = await cdp.evaluate(`const api = window.foroAPI;
+  const loggedOut = await cdp.eval(`let readBlocked = false, writeBlocked = false;
+    try { await window.foroAPI.getAll() } catch { readBlocked = true }
+    try { await window.foroAPI.setData('watchlist', []) } catch { writeBlocked = true }
+    return { readBlocked, writeBlocked, version: await window.foroAPI.getVersion() }`)
+  assert.equal(loggedOut.readBlocked, true)
+  assert.equal(loggedOut.writeBlocked, true)
+  assert.equal(typeof loggedOut.version, 'string')
+  const register = await cdp.eval(`return await window.foroAPI.auth.register('ci-smoke-user', 'ci-smoke-password-123')`)
+  assert.equal(register.ok, true, 'real Electron account registration')
+  const data = await cdp.eval(`const api = window.foroAPI;
     await api.setData('watchlist', [{ ticker: 'TEST', name: 'CI smoke' }]);
-    const data = await api.getAll();
-    const rejected = [];
+    const state = await api.getAll();
+    const blocked = [];
     for (const key of ['authUsers', 'authSession', 'llmApiCredential', 'llmLegacyApiKey', 'settings', '__proto__']) {
-      try { await api.setData(key, []); rejected.push(false) } catch { rejected.push(true) }
+      try { await api.setData(key, []); blocked.push(false) } catch { blocked.push(true) }
     }
-    let malformedRejected = false;
+    let malformedBlocked = false;
     try { await api.setData('portfolio', [{ ticker: 'TEST', shares: -1 }]) }
-    catch { malformedRejected = true }
-    const frame = document.createElement('iframe');
-    frame.src = 'about:blank'; document.body.append(frame);
-    await new Promise(r => setTimeout(r, 200));
-    let subframeRestricted = true;
-    if (frame.contentWindow.foroAPI) {
-      try { await frame.contentWindow.foroAPI.getAll(); subframeRestricted = false }
-      catch { subframeRestricted = true }
+    catch { malformedBlocked = true }
+    const iframe = document.createElement('iframe'); iframe.src = 'about:blank';
+    document.body.append(iframe); await new Promise(r => setTimeout(r, 100));
+    let frameBlocked = !iframe.contentWindow.foroAPI;
+    if (!frameBlocked) {
+      try { await iframe.contentWindow.foroAPI.getAll() } catch { frameBlocked = true }
     }
-    frame.remove();
-    return { saved: data.watchlist?.[0]?.ticker === 'TEST', secret: data.settings.apiKey,
-      hasKey: data.settings.hasApiKey, rejected, malformedRejected, subframeRestricted }`)
-  assert.equal(actual.saved, true, 'valid watchlist persists')
-  assert.equal(actual.secret, '', 'getAll redacts API key')
-  assert.equal(actual.hasKey, false)
-  assert.ok(actual.rejected.every(Boolean), 'protected keys cannot be overwritten')
-  assert.equal(actual.malformedRejected, true)
-  assert.equal(actual.subframeRestricted, true, 'subframe cannot read protected data')
-
-  const configured = await cdp.evaluate(`const api = window.foroAPI;
-    const first = await api.updateSettings(${JSON.stringify(settings)}, 'ci-dummy-key-alpha');
-    const visible = await api.getAll();
-    let forbiddenSettings = false;
-    try { await api.updateSettings({ ...${JSON.stringify(settings)}, apiKey: 'forbidden' }) }
-    catch { forbiddenSettings = true }
-    let offlineDenied = false;
-    try { await api.llmComplete('system', 'prompt') } catch { offlineDenied = true }
-    return { keyRedacted: first.apiKey === '' && visible.settings.apiKey === '',
-      presence: first.hasApiKey && visible.settings.hasApiKey, forbiddenSettings, offlineDenied }`)
-  assert.deepEqual(configured, {
-    keyRedacted: true, presence: true, forbiddenSettings: true, offlineDenied: true,
-  }, 'credential write is encrypted, not readable through renderer, and offline mode blocks LLM')
-
-  const rotated = await cdp.evaluate(`const api = window.foroAPI;
-    const changed = await api.updateSettings(${JSON.stringify(settings)}, 'ci-dummy-key-beta');
-    const removed = await api.clearApiKey();
+    iframe.remove();
+    return { saved: state.watchlist?.[0]?.ticker === 'TEST', secret: state.settings.apiKey,
+      blocked, malformedBlocked, frameBlocked }`)
+  assert.equal(data.saved, true)
+  assert.equal(data.secret, '')
+  assert.ok(data.blocked.every(Boolean), 'sensitive data keys must be rejected')
+  assert.equal(data.malformedBlocked, true)
+  assert.equal(data.frameBlocked, true)
+  const credentials = await cdp.eval(`const api = window.foroAPI;
+    const a = await api.updateSettings(${JSON.stringify(settings)}, 'ci-dummy-key-alpha');
+    const view = await api.getAll();
+    let rejected = false;
+    try { await api.updateSettings({ ...${JSON.stringify(settings)}, apiKey: 'invalid' }) }
+    catch { rejected = true }
+    let offlineBlocked = false;
+    try { await api.llmComplete('system', 'user') } catch { offlineBlocked = true }
+    const rotated = await api.updateSettings(${JSON.stringify(settings)}, 'ci-dummy-key-beta');
+    const cleared = await api.clearApiKey();
     const restored = await api.updateSettings(${JSON.stringify(settings)}, 'ci-dummy-key-gamma');
     await api.auth.logout();
-    let blocked = false;
-    try { await api.getAll() } catch { blocked = true }
-    const loggedIn = await api.auth.login('ci-smoke-user', 'ci-smoke-password-123', true);
-    return { changed: changed.hasApiKey, removed: !removed.hasApiKey,
-      restored: restored.hasApiKey, blocked, login: loggedIn.ok }`)
-  assert.deepEqual(rotated, { changed: true, removed: true, restored: true, blocked: true, login: true })
-  await stop(cdp)
-  cdp = null
-
-  const file = locateStore(appData)
-  assert.ok(file && file.startsWith(appData + path.sep), 'test profile store must reside in scratch APPDATA')
-  let stored = JSON.parse(readFileSync(file, 'utf8'))
-  const diskText = JSON.stringify(stored)
-  assert.equal(diskText.includes('ci-dummy-key-'), false, 'fresh credentials must not appear as plaintext')
-  assert.equal(stored.settings.apiKey, '', 'settings should not contain a persisted plaintext key')
-  assert.ok(stored.llmApiCredential && !stored.llmLegacyApiKey, 'new key should be stored encrypted')
-
+    let afterLogoutBlocked = false;
+    try { await api.getAll() } catch { afterLogoutBlocked = true }
+    const login = await api.auth.login('ci-smoke-user', 'ci-smoke-password-123', true);
+    return { secret: a.apiKey === '' && view.settings.apiKey === '',
+      present: a.hasApiKey && view.settings.hasApiKey,
+      rejected, offlineBlocked, rotated: rotated.hasApiKey, cleared: !cleared.hasApiKey,
+      restored: restored.hasApiKey, afterLogoutBlocked, login: login.ok }`)
+  assert.deepEqual(credentials, {
+    secret: true, present: true, rejected: true, offlineBlocked: true,
+    rotated: true, cleared: true, restored: true, afterLogoutBlocked: true, login: true,
+  })
+  await stop()
+  const filename = findStore(profile)
+  assert.ok(filename && filename.startsWith(profile + path.sep), 'store must use disposable userData')
+  let state = JSON.parse(readFileSync(filename, 'utf8'))
+  assert.equal(JSON.stringify(state).includes('ci-dummy-key-'), false, 'fresh key must not be plaintext')
+  assert.equal(state.settings.apiKey, '')
+  assert.ok(state.llmApiCredential && !state.llmLegacyApiKey, 'new key must be encrypted')
   cdp = await start()
-  const restarted = await cdp.evaluate(`const api = window.foroAPI;
-    const state = await api.getAll();
-    const session = await api.auth.getSession();
-    return { user: session?.username, ticker: state.watchlist?.[0]?.ticker,
-      secret: state.settings.apiKey, present: state.settings.hasApiKey }`)
-  assert.deepEqual(restarted, { user: 'ci-smoke-user', ticker: 'TEST', secret: '', present: true },
-    'saved session and collections survive relaunch without leaking key')
-  await stop(cdp)
-  cdp = null
-
-  // Reproduce a prior-version plaintext fixture in the temporary profile, never on user's PC.
-  stored = JSON.parse(readFileSync(file, 'utf8'))
-  stored.settings.apiKey = 'ci-legacy-key-fixture'
-  stored.llmApiCredential = ''
-  stored.llmLegacyApiKey = ''
-  writeFileSync(file, JSON.stringify(stored), 'utf8')
+  const reopened = await cdp.eval(`const api = window.foroAPI;
+    const data = await api.getAll(); const session = await api.auth.getSession();
+    return { username: session?.username, ticker: data.watchlist?.[0]?.ticker,
+      secret: data.settings.apiKey, present: data.settings.hasApiKey }`)
+  assert.deepEqual(reopened, { username: 'ci-smoke-user', ticker: 'TEST', secret: '', present: true })
+  await stop()
+  // Simulate a previous application's settings in a temporary profile, not a real user's data.
+  state = JSON.parse(readFileSync(filename, 'utf8'))
+  state.settings.apiKey = 'ci-legacy-key-fixture'
+  state.llmApiCredential = ''
+  state.llmLegacyApiKey = ''
+  writeFileSync(filename, JSON.stringify(state), 'utf8')
   cdp = await start()
-  const migrated = await cdp.evaluate(`const api = window.foroAPI;
-    const state = await api.getAll();
-    return { secret: state.settings.apiKey, present: state.settings.hasApiKey,
-      ticker: state.watchlist?.[0]?.ticker }`)
-  assert.deepEqual(migrated, { secret: '', present: true, ticker: 'TEST' },
-    'legacy migration redacts the key and conserves existing collections')
-  await stop(cdp)
-  cdp = null
-  const after = JSON.parse(readFileSync(file, 'utf8'))
-  assert.equal(JSON.stringify(after).includes('ci-legacy-key-fixture'), false,
-    'Windows migration must eliminate legacy plaintext in the current JSON file')
-  assert.ok(after.llmApiCredential && !after.llmLegacyApiKey)
-  console.log('PASS: Electron Windows startup, session, IPC allowlist, subframe, redaction, key rotation, restart, encrypted migration')
+  const migrated = await cdp.eval(`const value = await window.foroAPI.getAll();
+    return { secret: value.settings.apiKey, present: value.settings.hasApiKey,
+      ticker: value.watchlist?.[0]?.ticker }`)
+  assert.deepEqual(migrated, { secret: '', present: true, ticker: 'TEST' })
+  await stop()
+  const finalState = JSON.parse(readFileSync(filename, 'utf8'))
+  assert.equal(JSON.stringify(finalState).includes('ci-legacy-key-fixture'), false)
+  assert.ok(finalState.llmApiCredential && !finalState.llmLegacyApiKey)
+  console.log('PASS: real Electron IPC, session, key redaction and rotation, persistence, encrypted legacy migration')
 } finally {
-  if (running?.exitCode === null) running.kill()
+  if (child?.exitCode === null) child.kill()
   rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 })
 }
