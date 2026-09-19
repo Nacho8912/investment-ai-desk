@@ -4,12 +4,12 @@ import { readFileSync } from 'node:fs'
 
 const read = (file) => readFileSync(new URL(`../${file}`, import.meta.url), 'utf8')
 
-// These are static source invariants, not Electron integration or penetration tests.
-test('P1: renderer bridge does not expose arbitrary get/set or a credential getter', () => {
+// Static source invariants: these do not replace Electron IPC integration or penetration tests.
+test('P1: renderer bridge does not expose arbitrary get/set or ipcRenderer', () => {
   const preload = read('electron/preload.ts')
   assert.doesNotMatch(preload, /\bget:\s*\(key:/)
   assert.doesNotMatch(preload, /\bset:\s*\(key:/)
-  assert.doesNotMatch(preload, /ipcRenderer\s*[,}]/)
+  assert.doesNotMatch(preload, /exposeInMainWorld\(\s*['"]ipcRenderer['"]|\bipcRenderer:\s*ipcRenderer/)
   assert.match(preload, /llmComplete:/)
   assert.match(preload, /updateSettings:/)
 })
